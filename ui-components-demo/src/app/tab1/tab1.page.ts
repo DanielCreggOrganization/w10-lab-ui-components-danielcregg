@@ -1,7 +1,6 @@
 import { Component } from '@angular/core';
 import { IonHeader, IonToolbar, IonTitle, IonContent, IonCard, IonCardHeader, 
          IonCardSubtitle, IonCardTitle, IonCardContent, IonButton } from '@ionic/angular/standalone';
-import { ExploreContainerComponent } from '../explore-container/explore-container.component';
 
 @Component({
   selector: 'app-tab1',
@@ -10,7 +9,7 @@ import { ExploreContainerComponent } from '../explore-container/explore-containe
   standalone: true,
   imports: [
     IonHeader, IonToolbar, IonTitle, IonContent, IonCard, IonCardHeader,
-    IonCardSubtitle, IonCardTitle, IonCardContent, IonButton, ExploreContainerComponent
+    IonCardSubtitle, IonCardTitle, IonCardContent, IonButton
   ],
 })
 export class Tab1Page {

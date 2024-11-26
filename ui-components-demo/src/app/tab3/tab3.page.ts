@@ -3,7 +3,6 @@ import { IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonModal,
          IonButtons, IonItem, IonLabel, IonInput, AlertController, 
          ToastController } from '@ionic/angular/standalone';
 import { FormsModule } from '@angular/forms';
-import { ExploreContainerComponent } from '../explore-container/explore-container.component';
 
 @Component({
   selector: 'app-tab3',
@@ -11,7 +10,7 @@ import { ExploreContainerComponent } from '../explore-container/explore-containe
   styleUrls: ['tab3.page.scss'],
   standalone: true,
   imports: [IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonModal,
-           IonButtons, IonItem, IonLabel, IonInput, FormsModule, ExploreContainerComponent],
+           IonButtons, IonItem, IonLabel, IonInput, FormsModule],
 })
 export class Tab3Page {
   constructor(
