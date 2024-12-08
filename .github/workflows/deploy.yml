@@ -1,30 +1,30 @@
 name: Deploy Ionic App to GitHub Pages
 
-# Workflow Triggers
 on:
   push:
     branches: ["main"]
     paths-ignore:
       - 'LICENSE'
       - '.gitignore'
-  workflow_dispatch:  # Allow manual trigger
+      - 'README.md'
+      - '**.md'
+  workflow_dispatch:
 
-# Required permissions for GitHub Pages
 permissions:
-  contents: write      # Allow writing files
+  contents: write
   pages: write
   id-token: write
 
-# Global environment variables
 env:
-  NODE_VERSION: '18'  # Node.js version
-  ANGULAR_CONFIG: 'production'  # Build configuration
-  CACHE_KEY_PREFIX: 'ionic-gh-pages'  # Cache key prefix for better cache management
+  NODE_OPTIONS: '--max_old_space_size=4096'
+  NPM_CONFIG_LOGLEVEL: 'error'
+  NG_BUILD_PARALLEL: 'true'
+  NG_BUILD_CACHE: 'true'
+  BUILD_PATH: 'www'
 
-# Prevent concurrent deployments
 concurrency:
   group: "pages"
-  cancel-in-progress: true  # Changed to true to prevent queuing of outdated deployments
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -32,147 +32,210 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04  # Explicitly set Ubuntu version
-    timeout-minutes: 15  # Add timeout to prevent hanging workflows
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
 
     steps:
-      # SETUP PHASE
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # Shallow clone for faster checkout
+          fetch-depth: 1
 
-      - name: Extract repository and environment info
-        id: env-setup
+      - name: Detect Ionic project directory and configurations
+        id: project-config
+        shell: bash
         run: |
-          echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
-          echo "TIMESTAMP=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
-          echo "Node version: $(node -v)"
-          echo "NPM version: $(npm -v)"
-
-      - name: Detect Ionic project directory
-        id: find-ionic
-        run: |
+          # Find and validate Ionic project
           APP_PATH=$(find . -type f -name ionic.config.json -exec dirname {} \; | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "⚠️ No ionic.config.json found, using root directory"
-            APP_PATH="."
-          fi
-          # Validate project structure
-          if [ ! -f "$APP_PATH/package.json" ]; then
-            echo "❌ Error: package.json not found in $APP_PATH"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "::error::No ionic.config.json found in repository"
             exit 1
           fi
-          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
-          echo "PACKAGE_JSON_PATH=$(realpath $APP_PATH/package-lock.json)" >> $GITHUB_ENV
-          echo "📂 Ionic app path: $APP_PATH"
+          
+          # Required project files check
+          required_files=("package.json" "angular.json" "ionic.config.json")
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "$APP_PATH/$file" ]]; then
+              echo "::error::Required file $file not found in $APP_PATH"
+              exit 1
+            fi
+          done
+          
+          # Read Node.js version from package.json engines field, fallback to project dependencies
+          NODE_VERSION=$(node -p "(() => { 
+            const pkg = require('./${APP_PATH}/package.json');
+            if (pkg.engines && pkg.engines.node) {
+              return pkg.engines.node.replace(/[^0-9.]/g, '');
+            }
+            const deps = {...pkg.dependencies, ...pkg.devDependencies};
+            if (deps['@angular/core']) {
+              const angularVersion = deps['@angular/core'].replace(/[\^~=<>]/g, '').split('.')[0];
+              if (angularVersion >= 16) return '18';
+              if (angularVersion >= 14) return '16';
+              return '14';
+            }
+            return '18';
+          })()") || "18"
+          
+          # Detect project type
+          if [[ -f "$APP_PATH/src/app/app.config.ts" ]] && grep -q "bootstrapApplication" "$APP_PATH/src/main.ts"; then
+            PROJECT_TYPE="standalone"
+          else
+            PROJECT_TYPE="ngmodule"
+          fi
+          
+          # Get production configuration name from angular.json
+          PROD_CONFIG=$(node -p "(() => {
+            const angularJson = require('./${APP_PATH}/angular.json');
+            const projectName = Object.keys(angularJson.projects)[0];
+            const configs = angularJson.projects[projectName].architect.build.configurations;
+            return configs.production ? 'production' : 'prod';
+          })()") || "production"
+          
+          {
+            echo "APP_PATH=$APP_PATH"
+            echo "NODE_VERSION=$NODE_VERSION"
+            echo "PROJECT_TYPE=$PROJECT_TYPE"
+            echo "PACKAGE_JSON_PATH=$(realpath $APP_PATH/package-lock.json)"
+            echo "PROD_CONFIG=$PROD_CONFIG"
+            echo "REPO_NAME=${GITHUB_REPOSITORY##*/}"
+            echo "TIMESTAMP=$(date +%Y%m%d_%H%M%S)"
+          } >> $GITHUB_ENV
+          
+          echo "✓ Ionic project detected at: $APP_PATH"
+          echo "✓ Node.js version: $NODE_VERSION"
+          echo "✓ Project type: $PROJECT_TYPE"
+          echo "✓ Production config: $PROD_CONFIG"
 
-      # DEPENDENCIES PHASE
       - name: Setup Node.js and NPM cache
         uses: actions/setup-node@v3
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: ${{ env.PACKAGE_JSON_PATH }}
+          cache-dependency-path: '**/package-lock.json'
 
-      # Parallel installation of dependencies
       - name: Install dependencies
+        id: install
+        shell: bash
         run: |
-          # Install Ionic CLI globally in parallel with project dependencies
-          npm install -g @ionic/cli &
+          echo "::group::Installing dependencies"
+          
+          # Install Ionic CLI globally with performance flags
+          npm install -g @ionic/cli --no-audit --no-fund &
           IONIC_PID=$!
           
-          # Install project dependencies
           cd ${{ env.APP_PATH }}
-          npm ci --prefer-offline --no-audit
+          # Install project dependencies with optimizations
+          npm ci \
+            --prefer-offline \
+            --no-audit \
+            --no-fund \
+            --production=false
           
-          # Wait for Ionic CLI installation
           wait $IONIC_PID
+          echo "::endgroup::"
 
-      # BUILD PHASE
       - name: Build Ionic application
+        id: build
         working-directory: ${{ env.APP_PATH }}
+        shell: bash
         run: |
-          echo "🏗️ Starting build process..."
+          echo "::group::Building application"
           
-          # Build the app
-          ionic build --configuration=${{ env.ANGULAR_CONFIG }} -- --base-href /${{ env.REPO_NAME }}/ || {
-            echo "❌ Build failed"
-            exit 1
-          }
+          # Build with production optimizations
+          ionic build \
+            --configuration=${{ env.PROD_CONFIG }} \
+            --verbose=false \
+            -- \
+            --base-href=/${{ env.REPO_NAME }}/ \
+            --aot \
+            --build-optimizer \
+            --optimization \
+            --progress=false || {
+              echo "::error::Build failed"
+              exit 1
+            }
           
-          # Navigate to build output
-          cd www
-          
-          # Setup routing handlers for GitHub Pages
-          echo "⚙️ Setting up GitHub Pages routing..."
-          
-          # Create 404.html and add routing handler
-          cp index.html 404.html
-          
-          # Add routing handlers
-          sed -i '/<head>/a\
-          <!-- GitHub Pages 404 handler -->\
-          <script>\
-            (function() {\
-              var redirect = sessionStorage.redirect;\
-              delete sessionStorage.redirect;\
-              if (redirect && redirect != location.href) {\
-                history.replaceState(null, null, redirect);\
-              }\
-            })();\
-          </script>' 404.html
-          
-          sed -i '/<head>/a\
-          <!-- Route state preservation -->\
-          <script>\
-            (function() {\
-              var l = location.href;\
-              if (l.indexOf("?") > -1) {\
-                sessionStorage.redirect = l.substr(0, l.indexOf("?"));\
-              }\
-            })();\
-          </script>' index.html
-          
-          echo "✅ Build completed successfully"
-
-      # VALIDATION PHASE
-      - name: Verify build output
-        run: |
-          if [ ! -d "${{ env.APP_PATH }}/www" ]; then
-            echo "❌ Error: Build output directory not found"
+          # Quick build verification
+          if [[ ! -d "${{ env.BUILD_PATH }}" ]]; then
+            echo "::error::Build directory not found"
             exit 1
           fi
-          echo "📊 Build size: $(du -sh ${{ env.APP_PATH }}/www | cut -f1)"
+          
+          cd ${{ env.BUILD_PATH }}
+          
+          # Setup routing with error checking
+          echo "Setting up routing handlers..."
+          if [[ ! -f "index.html" ]]; then
+            echo "::error::index.html not found in build output"
+            exit 1
+          fi
+          
+          cp index.html 404.html
+          
+          # Add routing scripts to both files
+          for file in 404.html index.html; do
+            sed -i '/<head>/a\
+            <script>\
+              (function() {\
+                var redirect = sessionStorage.redirect;\
+                delete sessionStorage.redirect;\
+                if (redirect && redirect != location.href) {\
+                  history.replaceState(null, null, redirect);\
+                }\
+                var l = location.href;\
+                if (l.indexOf("?") > -1) {\
+                  sessionStorage.redirect = l.substr(0, l.indexOf("?"));\
+                }\
+              })();\
+            </script>' $file || {
+                echo "::error::Failed to add routing script to $file"
+                exit 1
+              }
+          done
+          
+          echo "✓ Build completed successfully"
+          echo "::endgroup::"
+          
+          # Output build size for monitoring
+          echo "BUILD_SIZE=$(du -sh . | cut -f1)" >> $GITHUB_ENV
 
-      # DEPLOYMENT PHASE
+      - name: Verify build for deployment
+        id: verify
+        shell: bash
+        run: |
+          echo "::group::Verifying build output"
+          if [[ ! -d "${{ env.APP_PATH }}/${{ env.BUILD_PATH }}" ]]; then
+            echo "::error::Build output directory not found"
+            exit 1
+          fi
+          echo "✓ Build output verified (size: ${{ env.BUILD_SIZE }})"
+          echo "::endgroup::"
+
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
         with:
           enablement: pages
-          
+
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3  # Revert to v3 as v4 is not available
+        uses: actions/upload-pages-artifact@v3
         with:
-          path: '${{ env.APP_PATH }}/www'
-          retention-days: 1  # Reduce retention period for artifacts
+          path: '${{ env.APP_PATH }}/${{ env.BUILD_PATH }}'
+          retention-days: 1
 
       - name: Deploy to GitHub Pages
-        id: deployment
+        id: deploy
         uses: actions/deploy-pages@v4
-        timeout-minutes: 5  # Add timeout for deployment
+        timeout-minutes: 5
 
       - name: Deployment status
         if: always()
         shell: bash
         run: |
-          DEPLOY_OUTCOME="${{ steps.deployment.outcome }}"
-          if [[ "$DEPLOY_OUTCOME" == "success" ]]; then
-            echo "✅ Deployment successful"
-            echo "🌍 Site available at: ${{ steps.deployment.outputs.page_url }}"
-            exit 0
+          if [[ "${{ steps.deploy.outcome }}" == "success" ]]; then
+            echo "✓ Deployment successful"
+            echo "::notice title=Deployed Site::${{ steps.deploy.outputs.page_url }}"
           else
-            echo "❌ Deployment failed"
-            echo "Deployment outcome: $DEPLOY_OUTCOME"
+            echo "::error::Deployment failed"
             exit 1
           fi
