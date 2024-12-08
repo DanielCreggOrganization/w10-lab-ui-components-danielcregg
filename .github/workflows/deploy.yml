@@ -5,17 +5,13 @@ on:
   push:
     branches: ["main"]
     paths-ignore:
-      # Prevent deployment on documentation changes
-      - '**/*.md'
-      - '**/*.MD'
-      - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
   workflow_dispatch:  # Allow manual trigger
 
 # Required permissions for GitHub Pages
 permissions:
-  contents: read
+  contents: write      # Allow writing files
   pages: write
   id-token: write
 
@@ -36,7 +32,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Explicitly set Ubuntu version
     timeout-minutes: 15  # Add timeout to prevent hanging workflows
 
     steps:
@@ -156,7 +152,7 @@ jobs:
           enablement: pages
           
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v3  # Revert to v3 as v4 is not available
         with:
           path: '${{ env.APP_PATH }}/www'
           retention-days: 1  # Reduce retention period for artifacts
@@ -170,11 +166,13 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [[ "${{ steps.deployment.outcome }}" == "success" ]]; then
+          DEPLOY_OUTCOME="${{ steps.deployment.outcome }}"
+          if [[ "$DEPLOY_OUTCOME" == "success" ]]; then
             echo "✅ Deployment successful"
             echo "🌍 Site available at: ${{ steps.deployment.outputs.page_url }}"
+            exit 0
           else
             echo "❌ Deployment failed"
-            echo "Deployment outcome: ${{ steps.deployment.outcome }}"
+            echo "Deployment outcome: $DEPLOY_OUTCOME"
             exit 1
           fi
